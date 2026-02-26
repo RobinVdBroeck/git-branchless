@@ -1,5 +1,6 @@
 //! Sub-commands of `git-branchless`.
 
+mod advance;
 mod amend;
 mod bug_report;
 mod hide;
@@ -33,6 +34,10 @@ fn command_main(ctx: CommandContext, opts: Opts) -> EyreExitOr<()> {
     } = opts;
 
     let exit_code = match command {
+        Command::Advance { move_options } => {
+            advance::advance(&effects, &git_run_info, &move_options)?
+        }
+
         Command::Amend {
             move_options,
             reparent,

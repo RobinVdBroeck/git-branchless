@@ -455,6 +455,24 @@ pub struct TestArgs {
 /// FIXME: write man-page text
 #[derive(Debug, Parser)]
 pub enum Command {
+    /// Move sibling commits onto the current commit.
+    ///
+    /// When you add a new commit to a branch that has child branches stacked
+    /// on it, those children remain based on the old tip. This command moves
+    /// them onto the current commit so the stack stays connected.
+    ///
+    /// For example, if you have `branch-1 -> branch-2` and you add a new
+    /// commit to `branch-1`, run `git advance` to move `branch-2` on top of
+    /// the new commit.
+    ///
+    /// This is equivalent to `git move -s <sibling> -d HEAD` for each
+    /// sibling, but is faster and requires no arguments.
+    Advance {
+        /// Options for moving commits.
+        #[clap(flatten)]
+        move_options: MoveOptions,
+    },
+
     /// Amend the current HEAD commit.
     Amend {
         /// Options for moving commits.
