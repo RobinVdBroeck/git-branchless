@@ -1,3 +1,29 @@
+# robinvdbroeck/gitlab-branchless
+
+This is my own fork, vibe coded with claude code, to fullfill my needs.
+Its' not upstreamed for serveral reasons:
+- It's fully vibe coded
+- It's only tested on my local repositories, with my way of working
+- Not all commands follow the philosophy of git-branchless, as I have my own
+  vision on how this should be used. (pushed branches can be rebased, but
+  commits not ammened, etc.)
+
+## Changes compared to upstream
+- **Fix worktree parent repo lookup** — Use `commondir()` instead of manual parent directory traversal, fixing `open_worktree_parent_repo()` for bare repos.
+- **Add bare repo worktree test** — Verify that amend + restack works correctly inside a worktree created from a bare repo.
+- **Add `git advance` command** — Move sibling commits onto HEAD to keep stacks connected. Includes a post-commit hint suggesting `git advance` when siblings are detected.
+- **Add `branchless.advance.auto` config** — Automatically advance siblings in the post-commit hook when enabled, removing the need to run `git advance` manually.
+- **Add `branchless.core.ignoreBranches` config** — Multi-value config to hide branches from the smartlog, sync, restack, and all other branchless operations. Supports exact names and glob patterns (e.g. `release/*`).
+
+## Using this fork:
+- Clone this repo
+- Run `cargo install --path=git-branchless` to install the modified `git-branchless` binary
+
+If you fork this yourself, you should be aware that master is not stable and
+will be force pushed because I'll try to keep it up to date with upstream.
+
+
+# Original README:
 <p align="center"><img width="147" height="147" src="https://user-images.githubusercontent.com/454057/144287756-8570ba1b-b9f1-46de-9236-ca17db246856.png" alt="git-branchless logo" /></p>
 
 <h1 align="center">Branchless workflow for Git</h1>
