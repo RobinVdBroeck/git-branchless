@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime};
 use eyre::Context;
 use tracing::{error, instrument};
 
+use crate::core::config::{get_ignore_branches, is_branch_ignored};
 use crate::core::effects::{Effects, OperationType};
 use crate::core::repo_ext::RepoExt;
 use crate::git::{CategorizedReferenceName, MaybeZeroOid, NonZeroOid, ReferenceName, Repo};
@@ -1315,11 +1316,18 @@ impl EventReplayer {
             }
         }
 
+        let ignore_patterns = get_ignore_branches(repo)?;
         let mut result: HashMap<NonZeroOid, HashSet<ReferenceName>> = HashMap::new();
         for (ref_name, ref_oid) in ref_name_to_oid.iter() {
             if let CategorizedReferenceName::LocalBranch { .. } =
                 CategorizedReferenceName::new(ref_name)
             {
+                if !ignore_patterns.is_empty() {
+                    let short_name = CategorizedReferenceName::new(ref_name).render_suffix();
+                    if is_branch_ignored(&short_name, &ignore_patterns) {
+                        continue;
+                    }
+                }
                 result
                     .entry(*ref_oid)
                     .or_default()

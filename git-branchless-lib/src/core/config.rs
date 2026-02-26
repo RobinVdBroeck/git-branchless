@@ -215,6 +215,58 @@ pub fn get_advance_auto(repo: &Repo) -> eyre::Result<bool> {
         .get_or("branchless.advance.auto", false)
 }
 
+/// Get the list of branch name patterns to ignore (exclude from branchless tracking).
+/// Supports exact names and glob patterns (e.g. `release/*`).
+///
+/// Set with: `git config --add branchless.core.ignoreBranches "pattern"`
+#[instrument]
+pub fn get_ignore_branches(repo: &Repo) -> eyre::Result<Vec<String>> {
+    let config = repo.get_readonly_config()?;
+    let entries = config.list("branchless.core.ignorebranches")?;
+    Ok(entries.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Check if a branch name matches any of the ignore patterns.
+/// Patterns support `*` as a glob wildcard matching any sequence of characters.
+pub fn is_branch_ignored(branch_name: &str, ignore_patterns: &[String]) -> bool {
+    ignore_patterns
+        .iter()
+        .any(|pattern| glob_match(pattern, branch_name))
+}
+
+/// Simple glob matching: `*` matches any sequence of characters.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        // No wildcard — exact match.
+        return pattern == text;
+    }
+
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        match text[pos..].find(part) {
+            Some(idx) => {
+                // First segment must match at the start.
+                if i == 0 && idx != 0 {
+                    return false;
+                }
+                pos += idx + part.len();
+            }
+            None => return false,
+        }
+    }
+    // Last segment must match at the end.
+    if let Some(last) = parts.last() {
+        if !last.is_empty() && !text.ends_with(last) {
+            return false;
+        }
+    }
+    true
+}
+
 /// If `true`, when restacking a commit, do not update its timestamp to the
 /// current time.
 #[instrument]

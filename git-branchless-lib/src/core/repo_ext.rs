@@ -10,7 +10,7 @@ use crate::git::{
     Branch, BranchType, CategorizedReferenceName, ConfigRead, NonZeroOid, ReferenceName, Repo,
 };
 
-use super::config::get_main_branch_name;
+use super::config::{get_ignore_branches, get_main_branch_name, is_branch_ignored};
 
 /// A snapshot of all the positions of references we care about in the repository.
 #[derive(Debug)]
@@ -97,10 +97,17 @@ https://github.com/arxanas/git-branchless/discussions/595 for more details.",
 
     #[instrument]
     fn get_branch_oid_to_names(&self) -> eyre::Result<HashMap<NonZeroOid, HashSet<ReferenceName>>> {
+        let ignore_patterns = get_ignore_branches(self)?;
         let mut result: HashMap<NonZeroOid, HashSet<ReferenceName>> = HashMap::new();
         for branch in self.get_all_local_branches()? {
             let reference = branch.into_reference();
             let reference_name = reference.get_name()?;
+            if !ignore_patterns.is_empty() {
+                let short_name = CategorizedReferenceName::new(&reference_name).render_suffix();
+                if is_branch_ignored(&short_name, &ignore_patterns) {
+                    continue;
+                }
+            }
             let reference_info = self.resolve_reference(&reference)?;
             if let Some(reference_oid) = reference_info.oid {
                 result
