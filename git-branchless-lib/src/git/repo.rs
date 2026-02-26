@@ -49,9 +49,6 @@ pub enum Error {
     #[error("could not open repository: {0}")]
     OpenRepo(#[source] git2::Error),
 
-    #[error("could not find repository to open for worktree {path:?}")]
-    OpenParentWorktreeRepository { path: PathBuf },
-
     #[error("could not open repository: {0}")]
     UnsupportedExtensionWorktreeConfig(#[source] git2::Error),
 
@@ -577,20 +574,10 @@ impl Repo {
             return Ok(None);
         }
 
-        // `git2` doesn't seem to support a way to directly look up the parent repository for the
-        // worktree.
-        let worktree_info_dir = self.get_path();
-        let parent_repo_path = match worktree_info_dir
-            .parent() // remove `.git`
-            .and_then(|path| path.parent()) // remove worktree name
-            .and_then(|path| path.parent()) // remove `worktrees`
-        {
-            Some(path) => path,
-            None => {
-                return Err(Error::OpenParentWorktreeRepository {
-                    path: worktree_info_dir.to_owned()});
-            },
-        };
+        // `commondir()` returns the shared common directory for worktrees,
+        // which is the parent repo's git dir. This works for both bare and
+        // non-bare parent repos.
+        let parent_repo_path = self.inner.commondir();
         let parent_repo = Self::from_dir(parent_repo_path)?;
         Ok(Some(parent_repo))
     }

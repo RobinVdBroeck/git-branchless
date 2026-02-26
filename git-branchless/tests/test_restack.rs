@@ -1,4 +1,4 @@
-use lib::testing::{GitInitOptions, GitRunOptions, make_git, remove_rebase_lines};
+use lib::testing::{Git, GitInitOptions, GitRunOptions, make_git, remove_rebase_lines};
 
 #[test]
 fn test_restack_amended_commit() -> eyre::Result<()> {
@@ -558,6 +558,69 @@ fn test_restack_non_observed_branch_commit() -> eyre::Result<()> {
         Finished restacking branches.
         :
         @ 59e7581 (> foo, master) create test2.txt
+        "###);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_restack_worktree_bare_repo() -> eyre::Result<()> {
+    let git = make_git()?;
+
+    // Create a bare repo instead of a normal one.
+    git.run(&["init", "--bare"])?;
+    git.run(&["config", "user.name", "Testy McTestface"])?;
+    git.run(&["config", "user.email", "test@example.com"])?;
+    git.run(&["config", "core.abbrev", "7"])?;
+    git.run(&[
+        "config",
+        "branchless.commitDescriptors.relativeTime",
+        "false",
+    ])?;
+    git.run(&["config", "branchless.restack.preserveTimestamps", "true"])?;
+    git.run(&["config", "core.autocrlf", "false"])?;
+
+    // Create a worktree with a "main" branch.
+    let worktree_path = git.repo_path.join("wt-main");
+    git.run(&[
+        "worktree",
+        "add",
+        worktree_path.to_str().unwrap(),
+        "-b",
+        "main",
+    ])?;
+    let wt = Git {
+        repo_path: worktree_path,
+        ..(*git).clone()
+    };
+
+    // Make an initial commit and initialize branchless.
+    wt.commit_file("initial", 0)?;
+    wt.branchless("init", &[])?;
+
+    // Create branch-1 with a commit, then branch-2 with another commit.
+    wt.run(&["checkout", "-b", "branch-1"])?;
+    wt.commit_file("test1", 1)?;
+    wt.run(&["checkout", "-b", "branch-2"])?;
+    wt.commit_file("test2", 2)?;
+
+    // Go back to branch-1 and amend its commit.
+    wt.run(&["checkout", "branch-1"])?;
+    wt.run(&["commit", "--amend", "-m", "commit c"])?;
+
+    // Restack should rebase branch-2 onto the reworded branch-1.
+    wt.branchless("restack", &[])?;
+
+    // Verify the final graph.
+    {
+        let stdout = wt.smartlog()?;
+        insta::assert_snapshot!(stdout, @r###"
+        O f777ecc (main) create initial.txt
+        |
+        @ 0da8f89 (> branch-1) commit c
+        |
+        o d0aacdc (branch-2) create test2.txt
         "###);
     }
 
