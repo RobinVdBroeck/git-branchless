@@ -200,6 +200,8 @@ fn test_hooks_in_worktree() -> eyre::Result<()> {
         insta::assert_snapshot!(stderr, @r###"
         branchless: processing 1 update: ref HEAD
         branchless: processed commit: cc4313e amended
+        hint: to move child commits onto this commit, run: git advance
+        hint: disable this hint by running: git config --global branchless.hint.advanceChildCommits false
         branchless: processing 1 rewritten commit
         "###);
         insta::assert_snapshot!(stdout, @r###"

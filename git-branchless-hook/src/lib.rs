@@ -16,6 +16,7 @@
 )]
 #![allow(clippy::too_many_arguments, clippy::blocks_in_conditions)]
 
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::fs::File;
 use std::io::{BufRead, stdin};
@@ -25,16 +26,28 @@ use eyre::Context;
 use git_branchless_invoke::CommandContext;
 use git_branchless_opts::{HookArgs, HookSubcommand};
 use itertools::Itertools;
-use lib::core::dag::Dag;
+use lib::core::config::{
+    Hint, get_advance_auto, get_hint_enabled, get_hint_string, get_restack_preserve_timestamps,
+    print_hint_suppression_notice,
+};
+use lib::core::dag::{CommitSet, Dag};
 use lib::core::repo_ext::RepoExt;
 use lib::core::rewrite::rewrite_hooks::get_deferred_commits_path;
+use lib::core::rewrite::{
+    BuildRebasePlanOptions, ExecuteRebasePlanOptions, ExecuteRebasePlanResult,
+    MergeConflictRemediation, RebasePlanBuilder, RebasePlanPermissions, RepoResource,
+    execute_rebase_plan,
+};
 use lib::util::EyreExitOr;
+use rayon::ThreadPoolBuilder;
 use tracing::{error, instrument, warn};
 
 use lib::core::eventlog::{Event, EventLogDb, EventReplayer, should_ignore_ref_updates};
 use lib::core::formatting::{Glyphs, Pluralize};
 use lib::core::gc::{gc, mark_commit_reachable};
-use lib::git::{CategorizedReferenceName, MaybeZeroOid, NonZeroOid, ReferenceName, Repo};
+use lib::git::{
+    CategorizedReferenceName, GitRunInfo, MaybeZeroOid, NonZeroOid, ReferenceName, Repo,
+};
 
 use lib::core::effects::Effects;
 pub use lib::core::rewrite::rewrite_hooks::{
@@ -81,7 +94,11 @@ fn hook_post_checkout(
     Ok(())
 }
 
-fn hook_post_commit_common(effects: &Effects, hook_name: &str) -> eyre::Result<()> {
+fn hook_post_commit_common(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+    hook_name: &str,
+) -> eyre::Result<()> {
     let now = SystemTime::now();
     let glyphs = Glyphs::detect();
     let repo = Repo::from_current_dir()?;
@@ -109,7 +126,7 @@ fn hook_post_commit_common(effects: &Effects, hook_name: &str) -> eyre::Result<(
     let event_replayer = EventReplayer::from_event_log_db(effects, &repo, &event_log_db)?;
     let event_cursor = event_replayer.make_default_cursor();
     let references_snapshot = repo.get_references_snapshot()?;
-    Dag::open_and_sync(
+    let dag = Dag::open_and_sync(
         effects,
         &repo,
         &event_replayer,
@@ -155,6 +172,94 @@ fn hook_post_commit_common(effects: &Effects, hook_name: &str) -> eyre::Result<(
         glyphs.render(commit.friendly_describe(&glyphs)?)?,
     )?;
 
+    let head_commit_set = CommitSet::from(commit_oid);
+    let parents = dag.query_parents(head_commit_set.clone())?;
+    let children = dag.query_children(parents)?;
+    let siblings = children.difference(&head_commit_set);
+    let siblings = dag.filter_visible_commits(siblings)?;
+
+    if get_advance_auto(&repo)? && !dag.set_is_empty(&siblings)? {
+        let head_commit = repo.find_commit_or_fail(commit_oid)?;
+        let build_options = BuildRebasePlanOptions {
+            force_rewrite_public_commits: false,
+            dump_rebase_constraints: false,
+            dump_rebase_plan: false,
+            detect_duplicate_commits_via_patch_id: true,
+        };
+
+        let rebase_plan_result =
+            match RebasePlanPermissions::verify_rewrite_set(&dag, build_options, &siblings)? {
+                Err(err) => Err(err),
+                Ok(permissions) => {
+                    let head_commit_parents: HashSet<_> =
+                        head_commit.get_parent_oids().into_iter().collect();
+                    let mut builder = RebasePlanBuilder::new(&dag, permissions);
+                    for sibling_oid in dag.commit_set_to_vec(&siblings)? {
+                        let sibling_commit = repo.find_commit_or_fail(sibling_oid)?;
+                        let parent_oids = sibling_commit.get_parent_oids();
+                        let new_parent_oids = parent_oids
+                            .into_iter()
+                            .map(|parent_oid| {
+                                if head_commit_parents.contains(&parent_oid) {
+                                    commit_oid
+                                } else {
+                                    parent_oid
+                                }
+                            })
+                            .collect_vec();
+                        builder.move_subtree(sibling_oid, new_parent_oids)?;
+                    }
+                    let thread_pool = ThreadPoolBuilder::new().build()?;
+                    let repo_pool = RepoResource::new_pool(&repo)?;
+                    builder.build(effects, &thread_pool, &repo_pool)?
+                }
+            };
+
+        match rebase_plan_result {
+            Ok(Some(rebase_plan)) => {
+                let execute_options = ExecuteRebasePlanOptions {
+                    now,
+                    event_tx_id,
+                    preserve_timestamps: get_restack_preserve_timestamps(&repo)?,
+                    force_in_memory: true,
+                    force_on_disk: false,
+                    dry_run: false,
+                    resolve_merge_conflicts: false,
+                    check_out_commit_options: Default::default(),
+                };
+                let result = execute_rebase_plan(
+                    effects,
+                    git_run_info,
+                    &repo,
+                    &event_log_db,
+                    &rebase_plan,
+                    &execute_options,
+                )?;
+                match result {
+                    ExecuteRebasePlanResult::Succeeded { rewritten_oids: _ }
+                    | ExecuteRebasePlanResult::WouldSucceed => {}
+                    ExecuteRebasePlanResult::DeclinedToMerge { failed_merge_info } => {
+                        failed_merge_info.describe(
+                            effects,
+                            &repo,
+                            MergeConflictRemediation::Insert,
+                        )?;
+                    }
+                    ExecuteRebasePlanResult::Failed { exit_code: _ } => {}
+                }
+            }
+            Ok(None) => {}
+            Err(_err) => {}
+        }
+    } else if get_hint_enabled(&repo, Hint::AdvanceChildCommits)? && !dag.set_is_empty(&siblings)? {
+        writeln!(
+            effects.get_output_stream(),
+            "{}: to move child commits onto this commit, run: git advance",
+            glyphs.render(get_hint_string())?,
+        )?;
+        print_hint_suppression_notice(effects, Hint::AdvanceChildCommits)?;
+    }
+
     Ok(())
 }
 
@@ -162,8 +267,8 @@ fn hook_post_commit_common(effects: &Effects, hook_name: &str) -> eyre::Result<(
 ///
 /// See the man-page for `githooks(5)`.
 #[instrument]
-fn hook_post_commit(effects: &Effects) -> eyre::Result<()> {
-    hook_post_commit_common(effects, "post-commit")
+fn hook_post_commit(effects: &Effects, git_run_info: &GitRunInfo) -> eyre::Result<()> {
+    hook_post_commit_common(effects, git_run_info, "post-commit")
 }
 
 /// Handle Git's `post-merge` hook. It seems that Git doesn't invoke the
@@ -172,16 +277,20 @@ fn hook_post_commit(effects: &Effects) -> eyre::Result<()> {
 ///
 /// See the man-page for `githooks(5)`.
 #[instrument]
-fn hook_post_merge(effects: &Effects, _is_squash_merge: isize) -> eyre::Result<()> {
-    hook_post_commit_common(effects, "post-merge")
+fn hook_post_merge(
+    effects: &Effects,
+    git_run_info: &GitRunInfo,
+    _is_squash_merge: isize,
+) -> eyre::Result<()> {
+    hook_post_commit_common(effects, git_run_info, "post-merge")
 }
 
 /// Handle Git's `post-applypatch` hook.
 ///
 /// See the man-page for `githooks(5)`.
 #[instrument]
-fn hook_post_applypatch(effects: &Effects) -> eyre::Result<()> {
-    hook_post_commit_common(effects, "post-applypatch")
+fn hook_post_applypatch(effects: &Effects, git_run_info: &GitRunInfo) -> eyre::Result<()> {
+    hook_post_commit_common(effects, git_run_info, "post-applypatch")
 }
 
 mod reference_transaction {
@@ -629,7 +738,7 @@ pub fn command_main(ctx: CommandContext, args: HookArgs) -> EyreExitOr<()> {
         }
 
         HookSubcommand::PostApplypatch => {
-            hook_post_applypatch(&effects)?;
+            hook_post_applypatch(&effects, &git_run_info)?;
         }
 
         HookSubcommand::PostCheckout {
@@ -646,11 +755,11 @@ pub fn command_main(ctx: CommandContext, args: HookArgs) -> EyreExitOr<()> {
         }
 
         HookSubcommand::PostCommit => {
-            hook_post_commit(&effects)?;
+            hook_post_commit(&effects, &git_run_info)?;
         }
 
         HookSubcommand::PostMerge { is_squash_merge } => {
-            hook_post_merge(&effects, is_squash_merge)?;
+            hook_post_merge(&effects, &git_run_info, is_squash_merge)?;
         }
 
         HookSubcommand::PostRewrite { rewrite_type } => {

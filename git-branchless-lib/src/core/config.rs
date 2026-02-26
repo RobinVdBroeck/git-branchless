@@ -207,6 +207,14 @@ pub fn get_undo_create_snapshots(repo: &Repo) -> eyre::Result<bool> {
         .get_or("branchless.undo.createSnapshots", true)
 }
 
+/// If `true`, automatically advance sibling commits onto the new HEAD after
+/// a commit, instead of just printing a hint.
+#[instrument]
+pub fn get_advance_auto(repo: &Repo) -> eyre::Result<bool> {
+    repo.get_readonly_config()?
+        .get_or("branchless.advance.auto", false)
+}
+
 /// If `true`, when restacking a commit, do not update its timestamp to the
 /// current time.
 #[instrument]
@@ -250,6 +258,10 @@ pub const RESTACK_WARN_ABANDONED_CONFIG_KEY: &str = "branchless.restack.warnAban
 /// Possible hint types.
 #[derive(Clone, Debug)]
 pub enum Hint {
+    /// Suggest running `git advance` when a commit has sibling commits that
+    /// could be moved onto it.
+    AdvanceChildCommits,
+
     /// Suggest running `git add` on skipped, untracked files, which are never
     /// automatically reconsidered for tracking.
     AddSkippedFiles,
@@ -273,6 +285,7 @@ pub enum Hint {
 impl Hint {
     fn get_config_key(&self) -> &'static str {
         match self {
+            Hint::AdvanceChildCommits => "branchless.hint.advanceChildCommits",
             Hint::AddSkippedFiles => "branchless.hint.addSkippedFiles",
             Hint::CleanCachedTestResults => "branchless.hint.cleanCachedTestResults",
             Hint::MoveImplicitHeadArgument => "branchless.hint.moveImplicitHeadArgument",
