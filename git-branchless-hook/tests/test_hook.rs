@@ -1,4 +1,4 @@
-use lib::testing::{GitRunOptions, GitWorktreeWrapper, make_git, make_git_worktree};
+use lib::testing::{Git, GitRunOptions, GitWorktreeWrapper, make_git, make_git_worktree};
 
 #[test]
 fn test_is_rebase_underway() -> eyre::Result<()> {
@@ -227,6 +227,128 @@ fn test_hooks_in_worktree() -> eyre::Result<()> {
         @ cc4313e amended
         "###);
     }
+
+    Ok(())
+}
+
+/// Verify that `git pack-refs` does not cause branches to disappear from the
+/// smartlog in a linked worktree.
+///
+/// When git packs refs, it fires the reference-transaction hook with fake
+/// "creation" (0→abc123) and "deletion" (abc123→0) events per packed ref.
+/// `fix_packed_reference_oid` is supposed to detect these as no-ops by
+/// consulting the packed-refs file. Previously, the packed-refs file was read
+/// from the worktree-specific git dir (where it doesn't exist) instead of the
+/// parent repo's git dir, so the empty HashMap caused the fake deletion events
+/// to be recorded, removing branches from the event log.
+#[test]
+fn test_hook_reference_transaction_pack_refs_in_worktree() -> eyre::Result<()> {
+    let git = make_git()?;
+
+    if !git.supports_reference_transactions()? {
+        return Ok(());
+    }
+
+    git.init_repo()?;
+    git.commit_file("test1", 1)?;
+
+    // Create a second branch so there are multiple refs to pack.
+    git.run(&["checkout", "-b", "feature"])?;
+    git.commit_file("test2", 2)?;
+    git.run(&["checkout", "master"])?;
+
+    let GitWorktreeWrapper {
+        temp_dir: _temp_dir,
+        worktree,
+    } = make_git_worktree(&git, "new-worktree")?;
+
+    // Verify the baseline smartlog (both branches visible).
+    let stdout_before = worktree.smartlog()?;
+    insta::assert_snapshot!(stdout_before, @r###"
+    :
+    @ 62fc20d (master) create test1.txt
+    |
+    o 96d1c37 (feature) create test2.txt
+    "###);
+
+    // Pack all refs. This fires the reference-transaction hook twice per ref:
+    // once with 0→abc123 (fake creation) and once with abc123→0 (fake deletion).
+    // The fix ensures we read packed-refs from the parent repo's git dir so
+    // fix_packed_reference_oid can detect and ignore these no-op events.
+    worktree.run(&["pack-refs", "--all"])?;
+
+    // Smartlog should be identical after packing — no spurious deletions.
+    let stdout_after = worktree.smartlog()?;
+    assert_eq!(
+        stdout_before,
+        stdout_after,
+        "git pack-refs should not cause branches to disappear from the smartlog",
+    );
+
+    Ok(())
+}
+
+/// Same as above but using a bare repo as the primary repo, which was the
+/// original context where the packed-refs path bug was discovered.
+#[test]
+fn test_hook_reference_transaction_pack_refs_in_bare_worktree() -> eyre::Result<()> {
+    let git = make_git()?;
+
+    if !git.supports_reference_transactions()? {
+        return Ok(());
+    }
+
+    git.run(&["init", "--bare"])?;
+    git.run(&["config", "user.name", "Testy McTestface"])?;
+    git.run(&["config", "user.email", "test@example.com"])?;
+    git.run(&["config", "core.abbrev", "7"])?;
+    git.run(&[
+        "config",
+        "branchless.commitDescriptors.relativeTime",
+        "false",
+    ])?;
+    git.run(&["config", "branchless.restack.preserveTimestamps", "true"])?;
+    git.run(&["config", "core.autocrlf", "false"])?;
+
+    let worktree_path = git.repo_path.join("wt-main");
+    git.run(&[
+        "worktree",
+        "add",
+        worktree_path.to_str().unwrap(),
+        "-b",
+        "main",
+    ])?;
+    let wt = Git {
+        repo_path: worktree_path,
+        ..(*git).clone()
+    };
+
+    wt.commit_file("initial", 0)?;
+    wt.branchless("init", &[])?;
+
+    // Create a second branch so there are multiple refs to pack.
+    wt.run(&["checkout", "-b", "feature"])?;
+    wt.commit_file("test1", 1)?;
+    wt.run(&["checkout", "main"])?;
+
+    // Verify baseline — both branches visible.
+    let stdout_before = wt.smartlog()?;
+    insta::assert_snapshot!(stdout_before, @r###"
+    @ f777ecc (> main) create initial.txt
+    |
+    o 62fc20d (feature) create test1.txt
+    "###);
+
+    // Pack all refs from the worktree.
+    wt.run(&["pack-refs", "--all"])?;
+
+    // Smartlog must be unchanged — no spurious deletion events.
+    let stdout_after = wt.smartlog()?;
+    assert_eq!(
+        stdout_before,
+        stdout_after,
+        "git pack-refs should not cause branches to disappear from the smartlog",
+    );
 
     Ok(())
 }

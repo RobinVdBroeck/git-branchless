@@ -10,6 +10,7 @@ Its' not upstreamed for serveral reasons:
 
 ## Changes compared to upstream
 - **Fix worktree parent repo lookup** — Use `commondir()` instead of manual parent directory traversal, fixing `open_worktree_parent_repo()` for bare repos.
+- **Fix packed-refs path in worktree reference-transaction hook** — `read_packed_refs_file` now resolves the parent repo's git dir before reading `packed-refs`, so `git pack-refs` no longer records spurious branch-deletion events in linked worktrees (both bare and non-bare).
 - **Add bare repo worktree test** — Verify that amend + restack works correctly inside a worktree created from a bare repo.
 - **Add `git advance` command** — Move sibling commits onto HEAD to keep stacks connected. Includes a post-commit hint suggesting `git advance` when siblings are detected.
 - **Add `branchless.advance.auto` config** — Automatically advance siblings in the post-commit hook when enabled, removing the need to run `git advance` manually.

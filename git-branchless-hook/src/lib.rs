@@ -626,7 +626,17 @@ fn hook_reference_transaction(effects: &Effects, transaction_state: &str) -> eyr
     let event_log_db = EventLogDb::new(&conn)?;
     let event_tx_id = event_log_db.make_transaction_id(now, "reference-transaction")?;
 
-    let packed_references = read_packed_refs_file(&repo)?;
+    // Use the parent repo for packed-refs resolution: packed-refs lives in the
+    // main git dir, not in the worktree-specific git dir.
+    let parent_repo;
+    let main_repo = match repo.open_worktree_parent_repo()? {
+        Some(p) => {
+            parent_repo = p;
+            &parent_repo
+        }
+        None => &repo,
+    };
+    let packed_references = read_packed_refs_file(main_repo)?;
 
     let parsed_lines: Vec<ParsedReferenceTransactionLine> = stdin()
         .lock()
@@ -658,7 +668,7 @@ fn hook_reference_transaction(effects: &Effects, transaction_state: &str) -> eyr
                  new_value: _,
              }| !should_ignore_ref_updates(ref_name),
         )
-        .map(|parsed_line| fix_packed_reference_oid(&repo, &packed_references, parsed_line))
+        .map(|parsed_line| fix_packed_reference_oid(main_repo, &packed_references, parsed_line))
         .collect();
     if parsed_lines.is_empty() {
         return Ok(());
